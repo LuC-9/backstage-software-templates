@@ -1,4 +1,4 @@
-name: cicd
+name: ${{ values.app_name }}-cicd
 
 on:
   push:
@@ -15,17 +15,11 @@ jobs:
       commit_id: ${{ steps.commit.outputs.commit_id }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v3
 
       - name: Generate commit id
         id: commit
-        shell: bash
-        run: |
-          echo "commit_id=${GITHUB_SHA::6}" >> $GITHUB_OUTPUT
-
-      - name: Debug commit id
-        run: echo "Commit ID is ${{ steps.commit.outputs.commit_id }}"
+        run: echo "commit_id=${GITHUB_SHA::6}" >> $GITHUB_OUTPUT
 
       - name: Login to Docker Hub
         uses: docker/login-action@v3
@@ -33,38 +27,30 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and Push Docker Image
+      - name: Build and push
         uses: docker/build-push-action@v6
         with:
           push: true
-          tags: luc09/${{ github.event.repository.name }}:${{ steps.commit.outputs.commit_id }}
+          tags: luc09/${{ values.app_name }}:${{ steps.commit.outputs.commit_id }}
 
   cd:
     needs: ci
     runs-on: self-hosted
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-
-      - name: Debug commit from CI
-        run: echo "Commit from CI: ${{ needs.ci.outputs.commit_id }}"
-
-      - name: Install yq
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y yq
+      - uses: actions/checkout@v3
 
       - name: Update Helm values
         run: |
-          yq -Yi ".image.tag = \"${{ needs.ci.outputs.commit_id }}\"" \
-            charts/${{ github.event.repository.name }}/values-dev.yaml
+          FILE="charts/${{ values.app_name }}/values-${{ values.app_env }}.yaml"
+          TAG="${{ needs.ci.outputs.commit_id }}"
 
-      - name: Show updated values
-        run: |
-          cat charts/${{ github.event.repository.name }}/values-dev.yaml
+          echo "Updating $FILE with tag $TAG"
 
-      - name: Commit and push changes
+          sudo apt-get update && sudo apt-get install -y yq
+          yq -Yi ".image.tag = \"$TAG\"" "$FILE"
+
+      - name: Commit changes
         uses: EndBug/add-and-commit@v9
         with:
           message: "Update image tag to ${{ needs.ci.outputs.commit_id }}"
@@ -83,25 +69,22 @@ jobs:
             --username admin \
             --password ${{ secrets.ARGOCD_PASSWORD }}
 
-      - name: Ensure ArgoCD repo and app
+      - name: Ensure ArgoCD app
         run: |
-          APP_NAME=${{ github.event.repository.name }}
-          REPO_URL="https://github.com/aarsh-mishra-exp/$APP_NAME.git"
-
-          argocd repo list | grep -q $REPO_URL || argocd repo add $REPO_URL
+          APP_NAME=${{ values.app_name }}
 
           argocd app get $APP_NAME || argocd app create $APP_NAME \
-            --repo $REPO_URL \
+            --repo https://github.com/aarsh-mishra-exp/$APP_NAME.git \
             --path charts/$APP_NAME \
-            --dest-namespace dev \
+            --dest-namespace ${{ values.app_env }} \
             --dest-server https://kubernetes.default.svc \
-            --values values-dev.yaml \
+            --values values-${{ values.app_env }}.yaml \
             --revision main \
             --sync-policy manual \
             --sync-option CreateNamespace=true
 
-      - name: Sync ArgoCD app
+      - name: Sync app
         run: |
-          APP_NAME=${{ github.event.repository.name }}
+          APP_NAME=${{ values.app_name }}
           argocd app sync $APP_NAME
           argocd app wait $APP_NAME --timeout 180
