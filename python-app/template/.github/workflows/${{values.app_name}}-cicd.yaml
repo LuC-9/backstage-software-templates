@@ -1,91 +1,107 @@
-name: ${{values.app_name}}-cicd
+name: cicd
 
 on:
   push:
-    paths:
-      - src/**
     branches:
       - main
+    paths:
+      - src/**
 
 jobs:
   ci:
     runs-on: ubuntu-latest
-    steps:
 
-      - name: Shorten commit id
+    outputs:
+      commit_id: ${{ steps.commit.outputs.commit_id }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Generate commit id
+        id: commit
         shell: bash
         run: |
-          echo "COMMIT_ID=${GITHUB_SHA::6}" >> "$GITHUB_ENV"
-      -
-        name: Login to Docker Hub
+          echo "commit_id=${GITHUB_SHA::6}" >> $GITHUB_OUTPUT
+
+      - name: Debug commit id
+        run: echo "Commit ID is ${{ steps.commit.outputs.commit_id }}"
+
+      - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
-          username: ${{ '${{ secrets.DOCKERHUB_USERNAME }}' }}
-          password: ${{ '${{ secrets.DOCKERHUB_TOKEN }}' }}
-      -
-        name: Build and push
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and Push Docker Image
         uses: docker/build-push-action@v6
         with:
           push: true
-          tags: luc09/${{values.app_name}}:${{ '${{ env.COMMIT_ID }}' }}
-    outputs:
-      commit_id: ${{ '${{ env.COMMIT_ID }}' }}
+          tags: luc09/${{ github.event.repository.name }}:${{ steps.commit.outputs.commit_id }}
 
   cd:
     needs: ci
     runs-on: self-hosted
+
     steps:
+      - name: Checkout
+        uses: actions/checkout@v3
 
-      - uses: actions/checkout@v3
+      - name: Debug commit from CI
+        run: echo "Commit from CI: ${{ needs.ci.outputs.commit_id }}"
 
-      - name: Modify values file
-        shell: bash
+      - name: Install yq
         run: |
-          echo ${{ '${{needs.ci.outputs.commit_id}}' }}
-          sudo apt-get update && sudo apt-get install -y yq
-          yq -Yi ".image.tag = \"${{needs.ci.outputs.commit_id}}\"" charts/${{values.app_name}}/values-${{values.app_env}}.yaml
-      - name: Commit changes
+          sudo apt-get update
+          sudo apt-get install -y yq
+
+      - name: Update Helm values
+        run: |
+          yq -Yi ".image.tag = \"${{ needs.ci.outputs.commit_id }}\"" \
+            charts/${{ github.event.repository.name }}/values-dev.yaml
+
+      - name: Show updated values
+        run: |
+          cat charts/${{ github.event.repository.name }}/values-dev.yaml
+
+      - name: Commit and push changes
         uses: EndBug/add-and-commit@v9
         with:
-          message: 'Updates values.yaml with commit ${{ '${{needs.ci.outputs.commit_id}}' }}'
+          message: "Update image tag to ${{ needs.ci.outputs.commit_id }}"
 
-      - name: Install argocd
-        shell: bash
+      - name: Install ArgoCD CLI
         run: |
           curl -ksSL -o argocd https://argocd-server.argocd/download/argocd-linux-amd64
           chmod +x argocd
           sudo mv ./argocd /usr/local/bin/argocd
 
-      - name: argocd login
-        shell: bash
+      - name: Login to ArgoCD
         run: |
           argocd login argocd-server.argocd \
-            --insecure  \
+            --insecure \
             --grpc-web \
             --username admin \
-            --password  ${{ '${{ secrets.ARGOCD_PASSWORD }}' }}
+            --password ${{ secrets.ARGOCD_PASSWORD }}
 
-      - name: Ensure argocd repo and app
-        shell: bash
+      - name: Ensure ArgoCD repo and app
         run: |
+          APP_NAME=${{ github.event.repository.name }}
+          REPO_URL="https://github.com/aarsh-mishra-exp/$APP_NAME.git"
 
-          # Connects the argocd repo
-          repo="https://github.com/aarsh-mishra-exp/${{values.app_name}}.git"
-          argocd repo list | grep -q $repo || argocd repo add $repo
+          argocd repo list | grep -q $REPO_URL || argocd repo add $REPO_URL
 
-          # Creates the argocd app
-          argocd app get ${{values.app_name}} || argocd app create ${{values.app_name}} \
-            --repo $repo \
-            --path charts/${{values.app_name}} \
-            --dest-namespace ${{values.app_env}} \
+          argocd app get $APP_NAME || argocd app create $APP_NAME \
+            --repo $REPO_URL \
+            --path charts/$APP_NAME \
+            --dest-namespace dev \
             --dest-server https://kubernetes.default.svc \
-            --values values-${{values.app_env}}.yaml \
+            --values values-dev.yaml \
             --revision main \
             --sync-policy manual \
             --sync-option CreateNamespace=true
 
-      - name: Argocd app sync
-        shell: bash
+      - name: Sync ArgoCD app
         run: |
-          argocd app sync ${{values.app_name}}
-          argocd app wait ${{values.app_name}} --timeout 180
+          APP_NAME=${{ github.event.repository.name }}
+          argocd app sync $APP_NAME
+          argocd app wait $APP_NAME --timeout 180
