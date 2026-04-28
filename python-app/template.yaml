@@ -43,7 +43,7 @@ spec:
       input:
       
         description: This is ${{ parameters.component_id }}
-        repoUrl: github.com?owner=LuC-9&repo=${{parameters.component_id}}
+        repoUrl: github.com?owner=aarsh-mishra-exp&repo=${{parameters.component_id}}
         protectDefaultBranch: false
         repoVisibility: public
 
